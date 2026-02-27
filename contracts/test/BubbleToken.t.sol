@@ -166,6 +166,9 @@ contract BubbleTokenTest is Test {
 
         assertEq(token.efficiencyCredits(alice), 500e18);
 
+        // M-05: Must wait for credit lock to expire before consuming
+        vm.warp(block.timestamp + 1 hours);
+
         vm.prank(gameController);
         token.consumeCredits(alice, 200e18);
         assertEq(token.efficiencyCredits(alice), 300e18);
@@ -175,6 +178,48 @@ contract BubbleTokenTest is Test {
         vm.prank(gameController);
         vm.expectRevert(BubbleToken.InsufficientCredits.selector);
         token.consumeCredits(alice, 100e18);
+    }
+
+    function test_M05_consumeRevertsWhileLocked() public {
+        // Give alice credits via DEX buy
+        vm.prank(gameController);
+        token.mint(dexPair, 10000e18);
+        vm.prank(dexPair);
+        token.transfer(alice, 2000e18); // 1000e18 credits
+
+        assertGt(token.efficiencyCredits(alice), 0, "Should have credits");
+        assertGt(token.creditUnlockTime(alice), block.timestamp, "Credits should be locked");
+
+        // Consuming should revert while locked
+        vm.prank(gameController);
+        vm.expectRevert(abi.encodeWithSelector(BubbleToken.CreditsLocked.selector, block.timestamp + 1 hours));
+        token.consumeCredits(alice, 100e18);
+
+        // After 1 hour, consuming should work
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(gameController);
+        token.consumeCredits(alice, 100e18);
+        assertEq(token.efficiencyCredits(alice), 900e18);
+    }
+
+    function test_M05_creditLockResetOnNewBuy() public {
+        vm.prank(gameController);
+        token.mint(dexPair, 20000e18);
+
+        // First buy
+        vm.prank(dexPair);
+        token.transfer(alice, 2000e18);
+        uint256 firstUnlock = token.creditUnlockTime(alice);
+
+        // Advance 30 min
+        vm.warp(block.timestamp + 30 minutes);
+
+        // Second buy resets the lock
+        vm.prank(dexPair);
+        token.transfer(alice, 2000e18);
+        uint256 secondUnlock = token.creditUnlockTime(alice);
+
+        assertGt(secondUnlock, firstUnlock, "Lock should be extended on new buy");
     }
 
     // === Burn Tests ===

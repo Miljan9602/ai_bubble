@@ -11,6 +11,8 @@ import "./interfaces/IFactionWar.sol";
 
 contract GameController is AccessControl, ReentrancyGuard {
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+    uint256 public constant MAX_OPERATOR_MINT = 100_000_000 * 1e18; // L-09: 100M cap
+    uint256 public operatorMinted;
 
     address public bubbleNFT;
     address public bubbleToken;
@@ -118,10 +120,18 @@ contract GameController is AccessControl, ReentrancyGuard {
     function mintTokens(address to, uint256 amount) external onlyRole(OPERATOR_ROLE) {
         require(to != address(0), "Zero address");
         require(amount > 0, "Zero amount");
+        require(operatorMinted + amount <= MAX_OPERATOR_MINT, "Operator mint cap exceeded");
+        operatorMinted += amount;
         IBubbleToken(bubbleToken).mint(to, amount);
     }
 
     function emergencyPause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         IBubbleFarm(bubbleFarm).setFarmingActive(false);
+    }
+
+    /// @notice Resume farming after an emergency pause (L-08 fix).
+    /// @dev Gated by DEFAULT_ADMIN_ROLE (not OPERATOR) since pausing is admin-only.
+    function resumeFarming() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        IBubbleFarm(bubbleFarm).setFarmingActive(true);
     }
 }

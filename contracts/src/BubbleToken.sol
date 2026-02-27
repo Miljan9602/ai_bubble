@@ -8,9 +8,11 @@ contract BubbleToken is ERC20, Ownable {
     address public dexPair;
     mapping(address => bool) public authorized;
     mapping(address => uint256) public efficiencyCredits;
+    mapping(address => uint256) public creditUnlockTime;
     uint256 public constant CREDIT_MULTIPLIER = 50;
     uint256 public constant MIN_CREDIT_TRANSFER = 1000 * 1e18; // Minimum 1,000 BUBBLE to earn credits
     uint256 public constant MAX_CREDITS = 5_000_000 * 1e18; // Cap at 5M credits
+    uint256 public constant CREDIT_LOCK_DURATION = 1 hours; // M-05: prevent flash-swap credit abuse
 
     event EfficiencyCreditsEarned(address indexed player, uint256 credits);
     event EfficiencyCreditsConsumed(address indexed player, uint256 credits);
@@ -19,6 +21,7 @@ contract BubbleToken is ERC20, Ownable {
 
     error NotAuthorized();
     error InsufficientCredits();
+    error CreditsLocked(uint256 unlockTime);
 
     modifier onlyAuthorized() {
         if (!authorized[msg.sender]) revert NotAuthorized();
@@ -47,7 +50,11 @@ contract BubbleToken is ERC20, Ownable {
         _mint(to, amount);
     }
 
+    /// @notice Consume efficiency credits from a player. Credits are locked for 1 hour after earning
+    ///         to prevent flash-swap attacks where someone borrows tokens from the DEX pair,
+    ///         earns credits, uses them for a GPU discount, then repays in the same transaction (M-05 fix).
     function consumeCredits(address player, uint256 amount) external onlyAuthorized {
+        if (creditUnlockTime[player] > block.timestamp) revert CreditsLocked(creditUnlockTime[player]);
         if (efficiencyCredits[player] < amount) revert InsufficientCredits();
         efficiencyCredits[player] -= amount;
         emit EfficiencyCreditsConsumed(player, amount);
@@ -89,6 +96,7 @@ contract BubbleToken is ERC20, Ownable {
                 }
                 if (credits > 0) {
                     efficiencyCredits[to] += credits;
+                    creditUnlockTime[to] = block.timestamp + CREDIT_LOCK_DURATION; // M-05: lock credits for 1hr
                     emit EfficiencyCreditsEarned(to, credits);
                 }
             }

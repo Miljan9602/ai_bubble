@@ -510,6 +510,9 @@ contract FullDeploymentTest is Test {
         // Step 3: Mint an NFT for player1 and verify they can upgrade with credits
         uint256 tokenId = _mintNFT(player1, 0);
 
+        // M-05: Wait for credit lock to expire (1 hour)
+        vm.warp(block.timestamp + 1 hours);
+
         uint256 balanceBefore = token.balanceOf(player1);
         uint256 creditsBefore = token.efficiencyCredits(player1);
 

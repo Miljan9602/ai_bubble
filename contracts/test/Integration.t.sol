@@ -311,4 +311,177 @@ contract IntegrationTest is Test {
         vm.expectRevert("Zero address");
         freshGpu.setContracts(address(nft), address(0));
     }
+
+    // === Re-audit Fix Tests ===
+
+    function test_M05_creditLockPreventsFlashSwapAbuse() public {
+        // Setup: Give player1 some BUBBLE via minting + farming
+        uint256 mintPrice = nft.getMintPrice(0);
+        vm.prank(player1);
+        nft.mint{value: mintPrice}(0, mintPrice);
+
+        vm.warp(block.timestamp + 20 days);
+        vm.prank(player1);
+        farm.claim(1);
+
+        // Setup DEX pair on token (controller owns token after setUp's transferOwnership)
+        address dexPair = makeAddr("dexPair");
+        vm.prank(address(controller));
+        token.setDexPair(dexPair);
+
+        // Simulate DEX buy: mint to pair, then transfer from pair to player1
+        vm.prank(address(controller));
+        token.mint(dexPair, 10_000e18);
+        vm.prank(dexPair);
+        token.transfer(player1, 5000e18); // Earns 2500e18 credits
+
+        uint256 credits = token.efficiencyCredits(player1);
+        assertGt(credits, 0, "Should have earned credits");
+
+        // Credits should be locked — upgrade should revert when trying to use them
+        vm.startPrank(player1);
+        token.approve(address(gpu), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(BubbleToken.CreditsLocked.selector, block.timestamp + 1 hours));
+        gpu.upgrade(1);
+        vm.stopPrank();
+
+        // After 1 hour, credits should be unlocked — upgrade succeeds
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(player1);
+        gpu.upgrade(1);
+        assertEq(gpu.gpuTier(1), 1, "Should have upgraded to tier 1");
+    }
+
+    function test_M05_upgradeWorksWithNoCredits() public {
+        // Upgrade without credits should work normally (no lock check)
+        uint256 mintPrice = nft.getMintPrice(0);
+        vm.prank(player1);
+        nft.mint{value: mintPrice}(0, mintPrice);
+
+        vm.warp(block.timestamp + 10 days);
+        vm.prank(player1);
+        farm.claim(1);
+
+        vm.startPrank(player1);
+        token.approve(address(gpu), type(uint256).max);
+        gpu.upgrade(1);
+        vm.stopPrank();
+        assertEq(gpu.gpuTier(1), 1, "Should upgrade without credits");
+    }
+
+    function test_M06_crossRoundFundIsolation() public {
+        // Start round 1 with 5 ETH
+        vm.deal(operator, 100 ether);
+        vm.prank(operator);
+        controller.startFactionRound{value: 5 ether}();
+
+        // Finalize round 1 — player1 gets 5 ETH
+        bytes32 leaf1 = keccak256(bytes.concat(keccak256(abi.encode(uint256(1), player1, uint256(5 ether)))));
+        vm.prank(operator);
+        controller.finalizeFactionRound(1, leaf1);
+
+        // Player1 claims their full 5 ETH prize
+        bytes32[] memory proof1 = new bytes32[](0);
+        vm.prank(player1);
+        war.claimPrize(1, 5 ether, proof1);
+
+        // Start round 2 with 3 ETH
+        vm.prank(operator);
+        controller.startFactionRound{value: 3 ether}();
+
+        // Fully vest round 1
+        vm.warp(block.timestamp + 7 days);
+
+        // Player1 withdraws round 1 — should get exactly 5 ETH, not touch round 2's 3 ETH
+        uint256 balBefore = player1.balance;
+        vm.prank(player1);
+        war.withdrawVested(1);
+        uint256 withdrawn = player1.balance - balBefore;
+        assertEq(withdrawn, 5 ether, "Should only withdraw from round 1's pool");
+
+        // Round 2's funds should still be intact (3 ETH)
+        assertEq(address(war).balance, 3 ether, "Round 2 funds should be untouched");
+    }
+
+    function test_M06_recoverOnlyUnclaimedPortion() public {
+        // Start and finalize a round with 10 ETH
+        vm.deal(operator, 100 ether);
+        vm.prank(operator);
+        controller.startFactionRound{value: 10 ether}();
+
+        // Player1 gets 3 ETH
+        bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(uint256(1), player1, uint256(3 ether)))));
+        vm.prank(operator);
+        controller.finalizeFactionRound(1, leaf);
+
+        // Player1 claims and fully vests
+        bytes32[] memory proof = new bytes32[](0);
+        vm.prank(player1);
+        war.claimPrize(1, 3 ether, proof);
+        vm.warp(block.timestamp + 7 days);
+        vm.prank(player1);
+        war.withdrawVested(1);
+
+        // Recovery after 30 days should only recover 7 ETH (10 - 3)
+        vm.warp(block.timestamp + 31 days);
+        uint256 adminBal = admin.balance;
+        vm.prank(address(controller));
+        war.recoverUnclaimedFunds(1, payable(admin));
+        assertEq(admin.balance - adminBal, 7 ether, "Should recover only unclaimed 7 ETH");
+    }
+
+    function test_L08_resumeFarmingAfterPause() public {
+        // Pause farming
+        vm.prank(admin);
+        controller.emergencyPause();
+        assertFalse(farm.farmingActive(), "Farming should be paused");
+
+        // Resume farming
+        vm.prank(admin);
+        controller.resumeFarming();
+        assertTrue(farm.farmingActive(), "Farming should be active after resume");
+    }
+
+    function test_L08_resumeFarmingOnlyAdmin() public {
+        vm.prank(admin);
+        controller.emergencyPause();
+
+        // Operator should not be able to resume
+        vm.prank(operator);
+        vm.expectRevert();
+        controller.resumeFarming();
+    }
+
+    function test_L09_operatorMintCap() public {
+        uint256 maxMint = controller.MAX_OPERATOR_MINT();
+        assertEq(maxMint, 100_000_000e18, "Max should be 100M");
+
+        // Mint up to cap
+        vm.prank(operator);
+        controller.mintTokens(operator, maxMint);
+        assertEq(controller.operatorMinted(), maxMint);
+
+        // Minting even 1 more wei should revert
+        vm.prank(operator);
+        vm.expectRevert("Operator mint cap exceeded");
+        controller.mintTokens(operator, 1);
+    }
+
+    function test_L09_operatorMintCapAcrossMultipleCalls() public {
+        uint256 maxMint = controller.MAX_OPERATOR_MINT();
+        uint256 half = maxMint / 2;
+
+        vm.prank(operator);
+        controller.mintTokens(operator, half);
+
+        vm.prank(operator);
+        controller.mintTokens(operator, half);
+
+        assertEq(controller.operatorMinted(), maxMint);
+
+        // One more should fail
+        vm.prank(operator);
+        vm.expectRevert("Operator mint cap exceeded");
+        controller.mintTokens(operator, 1);
+    }
 }
