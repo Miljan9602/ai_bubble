@@ -53,6 +53,12 @@ contract BubbleToken is ERC20, Ownable {
         emit EfficiencyCreditsConsumed(player, amount);
     }
 
+    /// @notice Burns tokens from an account without requiring ERC-20 allowance.
+    /// @dev Intentionally does NOT call _spendAllowance(). This is by design:
+    ///      only authorized contracts (BubbleFarm, GPUUpgrade) can call this,
+    ///      and they burn as part of game mechanics (yield claims, GPU upgrades).
+    ///      Requiring user approval for each game action would degrade UX.
+    ///      Access is restricted by the onlyAuthorized modifier (L-03 acknowledged).
     function burnFrom(address account, uint256 amount) external onlyAuthorized {
         _burn(account, amount);
     }

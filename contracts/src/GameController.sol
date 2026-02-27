@@ -10,7 +10,6 @@ import "./interfaces/IGPUUpgrade.sol";
 import "./interfaces/IFactionWar.sol";
 
 contract GameController is AccessControl, ReentrancyGuard {
-    bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
     address public bubbleNFT;
@@ -121,17 +120,6 @@ contract GameController is AccessControl, ReentrancyGuard {
         require(amount > 0, "Zero amount");
         IBubbleToken(bubbleToken).mint(to, amount);
     }
-
-    function withdrawNFTRevenue(address payable to) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
-        require(to != address(0), "Zero address");
-        IBubbleNFT(bubbleNFT).withdraw();
-        uint256 balance = address(this).balance;
-        require(balance > 0, "No balance");
-        (bool success, ) = to.call{value: balance}("");
-        require(success, "Transfer failed");
-    }
-
-    receive() external payable {}
 
     function emergencyPause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         IBubbleFarm(bubbleFarm).setFarmingActive(false);

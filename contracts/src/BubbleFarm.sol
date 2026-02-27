@@ -7,6 +7,8 @@ import "./interfaces/IBubbleNFT.sol";
 import "./interfaces/IBubbleToken.sol";
 import "./interfaces/IGPUUpgrade.sol";
 
+/// @title BubbleFarm — Per-NFT lazy yield farming with tier-aware multipliers.
+/// @notice Yield accrues per second based on GPU tier. Claims are lazy (O(1) per NFT).
 contract BubbleFarm is Ownable, ReentrancyGuard {
     event YieldClaimed(uint256 indexed tokenId, address indexed owner, uint256 amount);
     event NFTRegistered(uint256 indexed tokenId);
@@ -19,11 +21,16 @@ contract BubbleFarm is Ownable, ReentrancyGuard {
     IGPUUpgrade public gpuUpgrade;
 
     uint256 public constant BASE_YIELD_PER_DAY = 10_000 * 1e18;
+    uint256 public constant SECONDS_PER_DAY = 86400;
+    uint256 public constant MAX_BATCH_SIZE = 50;
     uint16[6] public TIER_MULTIPLIERS = [100, 150, 200, 300, 500, 800];
 
     mapping(uint256 => uint256) public lastClaimTime;
     bool public farmingActive;
     uint256 public startTime;
+    /// @notice Timestamp of the most recent pause→resume transition.
+    ///         Used to prevent yield accrual during pause windows.
+    uint256 public lastPauseEnd;
     bool private _contractsSet;
 
     constructor() Ownable(msg.sender) {}
@@ -39,7 +46,7 @@ contract BubbleFarm is Ownable, ReentrancyGuard {
     }
 
     function claimMultiple(uint256[] calldata tokenIds) external nonReentrant {
-        require(tokenIds.length <= 50, "Too many tokens");
+        require(tokenIds.length <= MAX_BATCH_SIZE, "Too many tokens");
         uint256 totalAmount = 0;
 
         for (uint256 i = 0; i < tokenIds.length; i++) {
@@ -56,29 +63,57 @@ contract BubbleFarm is Ownable, ReentrancyGuard {
         bubbleToken.mint(msg.sender, totalAmount);
     }
 
+    /// @notice Register an NFT for yield farming. Called by BubbleNFT (via GameController) on mint.
+    /// @dev If the game has not started yet (startTime > block.timestamp), yield begins at startTime
+    ///      rather than at mint time, preventing pre-game yield accrual (M-01 fix).
     function registerNFT(uint256 tokenId) external {
         require(
             msg.sender == address(bubbleNFT) || msg.sender == owner(),
             "Not authorized"
         );
         require(lastClaimTime[tokenId] == 0, "Already registered");
-        lastClaimTime[tokenId] = block.timestamp;
+
+        // M-01: If game hasn't started yet, set lastClaimTime to startTime
+        // so yield doesn't accrue from mint time before game begins.
+        if (startTime > 0 && startTime > block.timestamp) {
+            lastClaimTime[tokenId] = startTime;
+        } else {
+            lastClaimTime[tokenId] = block.timestamp;
+        }
         emit NFTRegistered(tokenId);
     }
 
+    /// @notice Calculate pending yield for an NFT.
+    /// @dev Yield = (elapsed * BASE_YIELD_PER_DAY * tierMultiplier) / (100 * SECONDS_PER_DAY).
+    ///      The effective lastClaim is clamped to max(lastClaimTime, lastPauseEnd) so that
+    ///      yield does not accrue during pause windows (M-02 fix).
     function pendingYield(uint256 tokenId) public view returns (uint256) {
         uint256 lastClaim = lastClaimTime[tokenId];
         if (lastClaim == 0) return 0;
         if (!farmingActive || block.timestamp < startTime) return 0;
 
+        // M-02: Clamp lastClaim to the most recent resume timestamp
+        // so yield doesn't accrue during pause windows.
+        if (lastPauseEnd > lastClaim) {
+            lastClaim = lastPauseEnd;
+        }
+
+        if (block.timestamp <= lastClaim) return 0;
+
         uint8 tier = gpuUpgrade.getEffectiveTier(tokenId);
         uint16 multiplier = TIER_MULTIPLIERS[tier];
         uint256 elapsed = block.timestamp - lastClaim;
 
-        return (elapsed * BASE_YIELD_PER_DAY * multiplier) / (100 * 86400);
+        return (elapsed * BASE_YIELD_PER_DAY * multiplier) / (100 * SECONDS_PER_DAY);
     }
 
+    /// @notice Toggle farming on/off. When resuming (active=true), records lastPauseEnd
+    ///         to prevent yield accrual during the pause window (M-02 fix).
     function setFarmingActive(bool active) external onlyOwner {
+        if (active && !farmingActive) {
+            // Resuming from pause — record the resume timestamp
+            lastPauseEnd = block.timestamp;
+        }
         farmingActive = active;
         emit FarmingActiveChanged(active);
     }

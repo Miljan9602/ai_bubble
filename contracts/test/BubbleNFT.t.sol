@@ -100,11 +100,26 @@ contract BubbleNFTTest is Test {
 
     function test_factionAssignment() public view {
         for (uint256 i = 0; i < 5; i++) {
-            assertEq(nft.getCompanyFaction(i), 0, "Companies 0-4 should be USA");
+            assertEq(nft.getCompanyFaction(i), 1, "Companies 0-4 should be USA (1)");
         }
         for (uint256 i = 5; i < 10; i++) {
-            assertEq(nft.getCompanyFaction(i), 1, "Companies 5-9 should be China");
+            assertEq(nft.getCompanyFaction(i), 2, "Companies 5-9 should be China (2)");
         }
+    }
+
+    function test_factionEncodingConsistency() public {
+        // Verify getCompanyFaction uses same encoding as getWalletFaction (1=USA, 2=China)
+        // Mint USA company to lock faction
+        uint256 price0 = nft.getMintPrice(0);
+        vm.prank(alice);
+        nft.mint{value: price0}(0, price0);
+        assertEq(nft.getWalletFaction(alice), nft.getCompanyFaction(0), "Wallet faction should match company faction encoding");
+
+        // Mint China company
+        uint256 price5 = nft.getMintPrice(5);
+        vm.prank(bob);
+        nft.mint{value: price5}(5, price5);
+        assertEq(nft.getWalletFaction(bob), nft.getCompanyFaction(5), "Wallet faction should match company faction encoding");
     }
 
     // === TokenID Encoding Tests ===

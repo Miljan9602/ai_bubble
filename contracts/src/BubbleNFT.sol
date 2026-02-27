@@ -9,6 +9,8 @@ import "./interfaces/IGameController.sol";
 contract BubbleNFT is ERC721, Ownable, ReentrancyGuard {
     uint256 public constant MAX_SUPPLY_PER_COMPANY = 7500;
     uint256 public constant NUM_COMPANIES = 10;
+    /// @dev Companies 0-4 are USA (faction 1), companies 5-9 are China (faction 2).
+    uint256 public constant USA_COMPANY_THRESHOLD = 5;
     uint256 public constant BASE_PRICE = 0.01 ether;
     uint256 public constant MAX_PRICE = 0.20 ether;
     uint256 public constant PRICE_INCREMENT = 25336700000000; // (0.19 ether) / 7499
@@ -48,7 +50,7 @@ contract BubbleNFT is ERC721, Ownable, ReentrancyGuard {
         require(companyId < NUM_COMPANIES, "Invalid company ID");
 
         // Faction lock: first mint locks wallet, subsequent mints must match
-        uint8 companyFaction = companyId < 5 ? 1 : 2; // 1 = USA, 2 = China
+        uint8 companyFaction = companyId < USA_COMPANY_THRESHOLD ? 1 : 2; // 1 = USA, 2 = China
         uint8 existingFaction = _walletFaction[msg.sender];
         if (existingFaction == 0) {
             _walletFaction[msg.sender] = companyFaction;
@@ -133,9 +135,11 @@ contract BubbleNFT is ERC721, Ownable, ReentrancyGuard {
         }
     }
 
+    /// @notice Returns the faction for a company. 1 = USA (companies 0-4), 2 = China (companies 5-9).
+    /// @dev Uses the same encoding as _walletFaction and mint() for consistency (M-03 fix).
     function getCompanyFaction(uint256 companyId) public pure returns (uint8) {
         require(companyId < NUM_COMPANIES, "Invalid company ID");
-        return companyId < 5 ? 0 : 1;
+        return companyId < USA_COMPANY_THRESHOLD ? 1 : 2;
     }
 
     function getCompanyIdFromToken(uint256 tokenId) public pure returns (uint256) {

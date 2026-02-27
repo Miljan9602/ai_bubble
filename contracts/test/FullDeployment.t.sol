@@ -293,12 +293,12 @@ contract FullDeploymentTest is Test {
         // --- Step 2: Player1 mints USA NFT (company 0) ---
         uint256 p1Token = _mintNFT(player1, 0);
         assertEq(nft.ownerOf(p1Token), player1, "P1 NFT ownership");
-        assertEq(nft.getCompanyFaction(0), 0, "Company 0 should be USA faction");
+        assertEq(nft.getCompanyFaction(0), 1, "Company 0 should be USA faction (1)");
 
         // --- Step 3: Player2 mints China NFT (company 5) ---
         uint256 p2Token = _mintNFT(player2, 5);
         assertEq(nft.ownerOf(p2Token), player2, "P2 NFT ownership");
-        assertEq(nft.getCompanyFaction(5), 1, "Company 5 should be China faction");
+        assertEq(nft.getCompanyFaction(5), 2, "Company 5 should be China faction (2)");
 
         // --- Step 4: Advance 1 day, both claim ~10,000 BUBBLE ---
         _advanceTime(ONE_DAY);
@@ -630,7 +630,8 @@ contract FullDeploymentTest is Test {
     // =======================================================================
 
     /// @notice Admin pauses the game, farming stops, no yield accrues during pause.
-    function test_emergencyPause() public {
+    ///         When resumed, yield only accrues from the resume timestamp (M-02 fix).
+    function test_emergencyPauseAndResume() public {
         // Mint an NFT and start earning
         uint256 tokenId = _mintNFT(player1, 0);
 
@@ -652,20 +653,31 @@ contract FullDeploymentTest is Test {
         // Verify farming is inactive
         assertFalse(farm.farmingActive(), "Farming should be inactive after pause");
 
-        // Advance another day — no yield should accrue
-        _advanceTime(ONE_DAY);
+        // Advance 2 days during pause — no yield should accrue
+        _advanceTime(2 * ONE_DAY);
         uint256 pendingDuringPause = farm.pendingYield(tokenId);
         assertEq(pendingDuringPause, 0, "No yield should accrue during pause");
 
-        // Balance should not change (nothing to claim)
-        vm.expectRevert("Nothing to claim");
+        // Resume farming — farm.setFarmingActive is onlyOwner and controller owns the farm
+        vm.prank(address(controller));
+        farm.setFarmingActive(true);
+
+        // Advance 1 day after resume
+        _advanceTime(ONE_DAY);
+
+        // Should only have 1 day of yield (not 3 days: 2 paused + 1 resumed)
+        uint256 pendingAfterResume = farm.pendingYield(tokenId);
+        assertApproxEqRel(pendingAfterResume, BASE_YIELD_PER_DAY, 0.01e18, "Should only have 1 day yield after resume (M-02)");
+
+        // Claim and verify balance increased by exactly 1 day
         vm.prank(player1);
         farm.claim(tokenId);
-
-        assertEq(
-            token.balanceOf(player1),
-            balanceAfterClaim,
-            "Balance should be unchanged during pause"
+        uint256 balanceAfterResumeClaim = token.balanceOf(player1);
+        assertApproxEqRel(
+            balanceAfterResumeClaim - balanceAfterClaim,
+            BASE_YIELD_PER_DAY,
+            0.01e18,
+            "Should earn exactly 1 day yield post-resume, not 3"
         );
     }
 
@@ -940,5 +952,95 @@ contract FullDeploymentTest is Test {
         // Advance time — no more yield
         _advanceTime(ONE_DAY);
         assertEq(farm.pendingYield(tokenId), 0, "No yield after game ended");
+    }
+
+    // =======================================================================
+    //  TEST: Pre-Game Mint (M-01 fix)
+    // =======================================================================
+
+    /// @notice NFTs minted before startGame() should not accrue yield until game starts.
+    function test_preGameMintYieldStartsAtGameStart() public {
+        // Deploy fresh contracts without starting game
+        vm.startPrank(deployer);
+
+        BubbleNFT freshNft = new BubbleNFT(companyNames);
+        BubbleToken freshToken = new BubbleToken();
+        BubbleFarm freshFarm = new BubbleFarm();
+        GPUUpgrade freshGpu = new GPUUpgrade();
+        FactionWar freshWar = new FactionWar();
+        GameController freshController = new GameController();
+
+        freshController.setContracts(
+            address(freshNft), address(freshToken), address(freshFarm),
+            address(freshGpu), address(freshWar)
+        );
+
+        freshNft.setGameController(address(freshController));
+        freshToken.setAuthorized(address(freshController), true);
+        freshToken.setAuthorized(address(freshFarm), true);
+        freshToken.setAuthorized(address(freshGpu), true);
+        freshFarm.setContracts(address(freshNft), address(freshToken), address(freshGpu));
+        freshGpu.setContracts(address(freshNft), address(freshToken));
+        freshFarm.transferOwnership(address(freshController));
+        freshGpu.transferOwnership(address(freshController));
+        freshWar.transferOwnership(address(freshController));
+        freshController.grantRole(freshController.OPERATOR_ROLE(), deployer);
+        freshNft.initializePricing(block.timestamp);
+
+        vm.stopPrank();
+
+        // Now deploy a second set where startGame is called with a future timestamp BEFORE minting
+        vm.startPrank(deployer);
+        BubbleNFT freshNft2 = new BubbleNFT(companyNames);
+        BubbleToken freshToken2 = new BubbleToken();
+        BubbleFarm freshFarm2 = new BubbleFarm();
+        GPUUpgrade freshGpu2 = new GPUUpgrade();
+        FactionWar freshWar2 = new FactionWar();
+        GameController freshController2 = new GameController();
+
+        freshController2.setContracts(
+            address(freshNft2), address(freshToken2), address(freshFarm2),
+            address(freshGpu2), address(freshWar2)
+        );
+
+        freshNft2.setGameController(address(freshController2));
+        freshToken2.setAuthorized(address(freshController2), true);
+        freshToken2.setAuthorized(address(freshFarm2), true);
+        freshToken2.setAuthorized(address(freshGpu2), true);
+        freshFarm2.setContracts(address(freshNft2), address(freshToken2), address(freshGpu2));
+        freshGpu2.setContracts(address(freshNft2), address(freshToken2));
+        freshFarm2.transferOwnership(address(freshController2));
+        freshGpu2.transferOwnership(address(freshController2));
+        freshWar2.transferOwnership(address(freshController2));
+        freshController2.grantRole(freshController2.OPERATOR_ROLE(), deployer);
+        freshNft2.initializePricing(block.timestamp);
+
+        // Start game with future timestamp (1 day from now)
+        uint256 futureStart = block.timestamp + ONE_DAY;
+        freshController2.startGame(futureStart);
+
+        vm.stopPrank();
+
+        // Player mints NOW (before futureStart)
+        uint256 price2 = freshNft2.getMintPrice(0);
+        vm.prank(player1);
+        freshNft2.mint{value: price2}(0, price2);
+
+        // lastClaimTime should be set to futureStart, not block.timestamp
+        assertEq(
+            freshFarm2.lastClaimTime(1),
+            futureStart,
+            "M-01: Pre-game mint should set lastClaimTime to startTime"
+        );
+
+        // No yield should accrue before game starts
+        assertEq(freshFarm2.pendingYield(1), 0, "No yield before game starts");
+
+        // Advance to game start + 1 day
+        vm.warp(futureStart + ONE_DAY);
+
+        // Now yield should accrue for exactly 1 day (from startTime, not mint time)
+        uint256 pending = freshFarm2.pendingYield(1);
+        assertApproxEqRel(pending, BASE_YIELD_PER_DAY, 0.01e18, "Should have exactly 1 day yield from game start");
     }
 }

@@ -21,6 +21,8 @@ contract FactionWar is Ownable, ReentrancyGuard {
     }
 
     uint256 public constant VESTING_DURATION = 7 days;
+    uint256 public constant RECOVERY_DELAY = 30 days;
+    uint256 public constant MIN_PRIZE_POOL = 0.1 ether;
     uint256 public currentRound;
 
     mapping(uint256 => Round) public rounds;
@@ -30,10 +32,12 @@ contract FactionWar is Ownable, ReentrancyGuard {
     event RoundFinalized(uint256 indexed roundId, bytes32 merkleRoot);
     event PrizeClaimed(uint256 indexed roundId, address indexed player, uint256 amount);
     event VestedWithdrawn(uint256 indexed roundId, address indexed player, uint256 amount);
+    event FundsRecovered(uint256 indexed roundId, address indexed to, uint256 amount);
 
     constructor() Ownable(msg.sender) {}
 
     function startRound() external payable onlyOwner {
+        require(msg.value >= MIN_PRIZE_POOL, "Prize pool too small");
         currentRound++;
         Round storage r = rounds[currentRound];
         r.prizePool = msg.value;
@@ -57,6 +61,7 @@ contract FactionWar is Ownable, ReentrancyGuard {
         require(msg.value > 0, "Must send value");
         Round storage r = rounds[roundId];
         require(r.startTime != 0, "Round does not exist");
+        require(!r.finalized, "Round already finalized");
         r.prizePool += msg.value;
     }
 
@@ -100,6 +105,25 @@ contract FactionWar is Ownable, ReentrancyGuard {
         require(success, "Transfer failed");
 
         emit VestedWithdrawn(roundId, msg.sender, withdrawable);
+    }
+
+    /// @notice Recover unclaimed funds from a finalized round after a 30-day timelock.
+    /// @dev Only callable by owner. Prevents premature recovery of active prize pools (M-04 fix).
+    /// @param roundId The round to recover funds from.
+    /// @param to The address to send recovered funds to.
+    function recoverUnclaimedFunds(uint256 roundId, address payable to) external onlyOwner nonReentrant {
+        require(to != address(0), "Zero address");
+        Round storage r = rounds[roundId];
+        require(r.finalized, "Round not finalized");
+        require(block.timestamp > r.endTime + RECOVERY_DELAY, "Recovery too early");
+
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No funds to recover");
+
+        (bool success, ) = to.call{value: balance}("");
+        require(success, "Transfer failed");
+
+        emit FundsRecovered(roundId, to, balance);
     }
 
     function getVestedAmount(

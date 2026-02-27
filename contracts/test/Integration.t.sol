@@ -75,7 +75,7 @@ contract IntegrationTest is Test {
 
         uint256 tokenId = 1; // company 0, first mint
         assertEq(nft.ownerOf(tokenId), player1);
-        assertEq(nft.getCompanyFaction(0), 0); // USA
+        assertEq(nft.getCompanyFaction(0), 1); // USA (1=USA, 2=China)
 
         // NFT is auto-registered in BubbleFarm via the mint → GameController → Farm chain
 
@@ -226,5 +226,89 @@ contract IntegrationTest is Test {
         vm.prank(operator);
         controller.mintTokens(operator, 1_000_000e18);
         assertEq(token.balanceOf(operator), 1_000_000e18);
+    }
+
+    // === Audit Fix Tests ===
+
+    function test_addPrizePoolRevertsOnFinalizedRound() public {
+        // Start a round
+        vm.deal(operator, 100 ether);
+        vm.prank(operator);
+        controller.startFactionRound{value: 1 ether}();
+
+        // Finalize the round
+        bytes32 root = keccak256(bytes.concat(keccak256(abi.encode(uint256(1), player1, uint256(0.5 ether)))));
+        vm.prank(operator);
+        controller.finalizeFactionRound(1, root);
+
+        // Try to add more funds — should revert (L-05 fix)
+        // war is owned by controller, so prank as controller
+        vm.deal(address(controller), 1 ether);
+        vm.prank(address(controller));
+        vm.expectRevert("Round already finalized");
+        war.addPrizePool{value: 1 ether}(1);
+    }
+
+    function test_startRoundRevertsWithInsufficientPrize() public {
+        // Try to start a round with less than MIN_PRIZE_POOL (0.1 ether) — should revert (L-06 fix)
+        vm.deal(operator, 100 ether);
+        vm.prank(operator);
+        vm.expectRevert("Prize pool too small");
+        controller.startFactionRound{value: 0.01 ether}();
+    }
+
+    function test_recoverUnclaimedFunds() public {
+        // Start and finalize a round
+        vm.deal(operator, 100 ether);
+        vm.prank(operator);
+        controller.startFactionRound{value: 1 ether}();
+
+        bytes32 root = keccak256(bytes.concat(keccak256(abi.encode(uint256(1), player1, uint256(0.5 ether)))));
+        vm.prank(operator);
+        controller.finalizeFactionRound(1, root);
+
+        // Try to recover too early — should revert (war is owned by controller)
+        vm.prank(address(controller));
+        vm.expectRevert("Recovery too early");
+        war.recoverUnclaimedFunds(1, payable(admin));
+
+        // Advance past 30-day recovery delay
+        vm.warp(block.timestamp + 31 days);
+
+        // Now recovery should work (war is owned by controller, so admin can't call directly)
+        // But war.recoverUnclaimedFunds is onlyOwner — owner is controller
+        // So we prank as controller
+        uint256 warBalance = address(war).balance;
+        assertGt(warBalance, 0, "War should have funds");
+
+        uint256 adminBalBefore = admin.balance;
+        vm.prank(address(controller));
+        war.recoverUnclaimedFunds(1, payable(admin));
+
+        assertEq(admin.balance - adminBalBefore, warBalance, "Should recover all funds");
+    }
+
+    function test_recoverRevertsOnUnfinalizedRound() public {
+        // Start a round but don't finalize
+        vm.deal(operator, 100 ether);
+        vm.prank(operator);
+        controller.startFactionRound{value: 1 ether}();
+
+        vm.warp(block.timestamp + 31 days);
+
+        vm.prank(address(controller));
+        vm.expectRevert("Round not finalized");
+        war.recoverUnclaimedFunds(1, payable(admin));
+    }
+
+    function test_gpuSetContractsZeroAddressReverts() public {
+        // Deploy a fresh GPU contract to test zero-address check (L-02 fix)
+        GPUUpgrade freshGpu = new GPUUpgrade();
+
+        vm.expectRevert("Zero address");
+        freshGpu.setContracts(address(0), address(token));
+
+        vm.expectRevert("Zero address");
+        freshGpu.setContracts(address(nft), address(0));
     }
 }

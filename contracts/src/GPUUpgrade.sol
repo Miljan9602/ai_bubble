@@ -44,12 +44,18 @@ contract GPUUpgrade is Ownable, ReentrancyGuard {
 
     function setContracts(address _nft, address _token) external onlyOwner {
         require(!_contractsSet, "Already set");
+        require(_nft != address(0) && _token != address(0), "Zero address");
         _contractsSet = true;
         bubbleNFT = IBubbleNFT(_nft);
         bubbleToken = IBubbleToken(_token);
         emit ContractsSet(_nft, _token);
     }
 
+    /// @notice Upgrade GPU tier for an NFT. Burns $BUBBLE (with optional efficiency credit discount).
+    /// @dev Credit discount math: credits give 1.5x value, so creditsNeededForFull = cost * 100 / 150.
+    ///      If player has full credits, actualBurn = creditsNeededForFull (33% cheaper).
+    ///      If partial credits, coveredByCredits = credits * 150 / 100, remainder = cost - covered,
+    ///      actualBurn = credits + remainder. CEI: state updates before external calls (L-01 fix).
     function upgrade(uint256 tokenId) external nonReentrant {
         require(address(bubbleNFT) != address(0), "Contracts not set");
         require(bubbleNFT.ownerOf(tokenId) == msg.sender, "Not NFT owner");
@@ -68,6 +74,7 @@ contract GPUUpgrade is Ownable, ReentrancyGuard {
         uint256 creditsUsed;
 
         if (playerCredits > 0) {
+            // creditsNeededForFull: amount of credits that fully cover upgradeCost at 1.5x value
             uint256 creditsNeededForFull = (upgradeCost * 100) / 150;
 
             if (playerCredits >= creditsNeededForFull) {
@@ -75,6 +82,7 @@ contract GPUUpgrade is Ownable, ReentrancyGuard {
                 actualBurn = creditsNeededForFull;
             } else {
                 creditsUsed = playerCredits;
+                // Each credit is worth 1.5x: coveredByCredits = credits * 150 / 100
                 uint256 coveredByCredits = (playerCredits * 150) / 100;
                 uint256 remainder = upgradeCost - coveredByCredits;
                 actualBurn = playerCredits + remainder;
@@ -85,15 +93,17 @@ contract GPUUpgrade is Ownable, ReentrancyGuard {
 
         require(bubbleToken.balanceOf(msg.sender) >= actualBurn, "Insufficient BUBBLE");
 
+        // --- Effects: state updates before external calls (CEI pattern, L-01 fix) ---
+        gpuTier[tokenId] = nextTier;
+        lastMaintenanceTime[tokenId] = block.timestamp;
+        tierUpgradeTime[tokenId] = block.timestamp;
+
+        // --- Interactions: external calls after state is finalized ---
         if (creditsUsed > 0) {
             bubbleToken.consumeCredits(msg.sender, creditsUsed);
         }
 
         bubbleToken.burnFrom(msg.sender, actualBurn);
-
-        gpuTier[tokenId] = nextTier;
-        lastMaintenanceTime[tokenId] = block.timestamp;
-        tierUpgradeTime[tokenId] = block.timestamp;
 
         emit GPUUpgraded(tokenId, msg.sender, nextTier, actualBurn);
     }
